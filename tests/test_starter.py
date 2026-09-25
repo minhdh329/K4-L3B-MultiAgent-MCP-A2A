@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -9,6 +11,8 @@ from student_agent import OUTPUT_SCHEMA_VERSION, VARIANT_ID
 from student_agent.cases import CaseSet, load_case_set
 from student_agent.contracts import Contracts
 from student_agent.submission import build_manifest
+from student_agent.trace import TraceWriter
+from student_agent.workflow import solve_case
 
 
 def write_json(path: Path, value: object) -> None:
@@ -45,3 +49,45 @@ def test_generated_manifest_matches_public_contract() -> None:
     manifest = build_manifest(case_set)
     contracts.validate_manifest(manifest)
     assert manifest["output_schema_version"] == OUTPUT_SCHEMA_VERSION
+
+
+class FakeGateway:
+    def __init__(self) -> None:
+        self.tools = {
+            "get_order",
+            "get_order_items",
+            "get_order_payments",
+            "get_payment_timeline",
+            "get_refund_timeline",
+            "get_shipment_summary",
+            "get_customer_history",
+            "get_sellers",
+            "get_policy",
+        }
+
+    async def list_tools(self) -> list[str]:
+        return sorted(self.tools)
+
+    async def call(self, tool_name: str, *, case_id: str, **arguments: str) -> dict[str, Any]:
+        suffix = f"{tool_name}_{arguments.get('order_id', 'case')}".replace("_", "-")
+        return {
+            "schema_version": "day09-mcp-evidence-v1",
+            "evidence_ref": f"ev_{suffix:0<20}"[:40],
+            "result_hash": "sha256:" + "a" * 64,
+            "domain": "order" if tool_name == "get_order" else "policy",
+            "data": {"order_id": arguments.get("order_id", "ORD_001")},
+        }
+
+
+def test_workflow_builds_schema_valid_output(tmp_path: Path) -> None:
+    contracts = Contracts(Path(__file__).resolve().parents[1] / "contracts" / "schemas")
+    trace = TraceWriter(tmp_path / "trace.jsonl", contracts)
+    output = asyncio.run(
+        solve_case(
+            {"case_id": "CASE_001", "exact_order_id": "ORD_001"},
+            FakeGateway(),
+            trace,
+        )
+    )
+    contracts.validate_output(output, "workflow output")
+    assert output["entity_resolution"]["resolved_order_ids"] == ["ORD_001"]
